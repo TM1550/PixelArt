@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Совместное пиксельное рисование</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="auth-bar">
+    <div id="user-info" style="display: none;">
+      <img id="user-avatar" src="" alt="">
+      <input id="nick-input" type="text" maxlength="32" placeholder="Ваш ник (до 32 символов)">
+      <button id="save-nick">Сохранить ник</button>
+      <span id="cooldown-status"></span>
+    </div>
+    <button id="google-login" style="display: none;">Войти через Google</button>
+  </div>
+
+  <div id="palette"></div>
+
+  <div id="canvas-container">
+    <canvas id="pixel-canvas" width="1000" height="1000"></canvas>
+    <div id="tooltip" style="display: none;"></div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
