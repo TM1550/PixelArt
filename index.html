@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Совместное пиксельное рисование</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -11,7 +11,7 @@
     <div id="user-info" style="display: none;">
       <img id="user-avatar" src="" alt="">
       <input id="nick-input" type="text" maxlength="32" placeholder="Ваш ник (до 32 символов)">
-      <button id="save-nick">Сохранить ник</button>
+      <button id="save-nick">Сохранить</button>
       <span id="cooldown-status"></span>
     </div>
     <button id="google-login" style="display: none;">Войти через Google</button>
@@ -19,9 +19,23 @@
 
   <div id="palette"></div>
 
-  <div id="canvas-container">
-    <canvas id="pixel-canvas" width="1000" height="1000"></canvas>
-    <div id="tooltip" style="display: none;"></div>
+  <div id="canvas-wrapper">
+    <div id="canvas-container">
+      <canvas id="pixel-canvas"></canvas>
+      <div id="tooltip" style="display: none;"></div>
+    </div>
+
+    <div id="viewport-controls">
+      <button id="zoom-in" title="Приблизить">+</button>
+      <button id="zoom-out" title="Отдалить">−</button>
+      <button id="fit-screen" title="Показать всё">⤢</button>
+      <span id="zoom-label">100%</span>
+    </div>
+
+    <div id="status-bar">
+      <span id="field-size">Поле: —</span>
+      <span id="cursor-pos">Курсор: —</span>
+    </div>
   </div>
 
   <script type="module" src="app.js"></script>
