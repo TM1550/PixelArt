@@ -4,7 +4,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged }
 import { getDatabase, ref, set, get, onValue }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-// === КОНФИГ ИЗ FIREBASE ===
+// === КОНФИГ ===
 // Your web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyBb8SFdz4CHRuIz1qwpcbyN4Zpfg3stdlo",
@@ -20,9 +20,27 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
 
-// === НАСТРОЙКИ ===
-const GRID_SIZE = 300;      // <-- поменяй на 200, если хочешь поле меньше
+// ============================================================
+// НАСТРОЙКИ
+// ============================================================
+const GRID_SIZE = 300;
 const COOLDOWN_MS = 5000;
+
+// Сколько настоящих пикселей канваса приходится на 1 пиксель поля.
+// Это ключевой фикс для мобильных: раньше было 1, из-за чего при
+// уменьшении субпиксельные квадраты исчезали.
+const PIXEL_SCALE = GRID_SIZE <= 500 ? 4 : 2;
+const CANVAS_W = GRID_SIZE * PIXEL_SCALE;
+const CANVAS_H = GRID_SIZE * PIXEL_SCALE;
+
+// === ЛИМИТЫ ЗУМА ===
+// Выражены в «экранных пикселях на один пиксель поля» — интуитивно понятны.
+// Изменяй эти две константы, чтобы настроить границы приближения.
+const MIN_PIXEL_SCREEN = 0.5;   // 1 пиксель поля занимает минимум 0.5 экранного пикселя
+const MAX_PIXEL_SCREEN = 60;    // ...и максимум 60 экранных пикселей (сильно приближено)
+
+const MIN_SCALE = MIN_PIXEL_SCREEN / PIXEL_SCALE;
+const MAX_SCALE = MAX_PIXEL_SCREEN / PIXEL_SCALE;
 
 const COLORS = [
   "#000000", "#FFFFFF", "#FF0000", "#00FF00",
@@ -46,23 +64,22 @@ const zoomLabel = document.getElementById("zoom-label");
 const cursorPosEl = document.getElementById("cursor-pos");
 const fieldSizeEl = document.getElementById("field-size");
 
-// Устанавливаем нативный размер канваса = логическому размеру поля
-canvas.width = GRID_SIZE;
-canvas.height = GRID_SIZE;
+canvas.width = CANVAS_W;
+canvas.height = CANVAS_H;
 
-fieldSizeEl.textContent = `Поле: ${GRID_SIZE} × ${GRID_SIZE} (${(GRID_SIZE * GRID_SIZE / 1000).toFixed(0)}K пикселей)`;
+fieldSizeEl.textContent = `Поле: ${GRID_SIZE} × ${GRID_SIZE} (${GRID_SIZE * GRID_SIZE} пикс.)`;
 
 // ============================================================
 // ОТРИСОВКА
 // ============================================================
 function drawPixel(x, y, colorIndex) {
   ctx.fillStyle = COLORS[colorIndex];
-  ctx.fillRect(x, y, 1, 1);
+  ctx.fillRect(x * PIXEL_SCALE, y * PIXEL_SCALE, PIXEL_SCALE, PIXEL_SCALE);
 }
 
 function clearCanvas() {
   ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 }
 
 // ============================================================
@@ -71,29 +88,35 @@ function clearCanvas() {
 let scale = 1;
 let offsetX = 0;
 let offsetY = 0;
-let minScale = 0.05;
-let maxScale = 60;
+let initialized = false;
 
 function applyTransform() {
   canvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
-  zoomLabel.textContent = Math.round(scale * 100) + "%";
+  // Показываем масштаб относительно «как в поле»: сколько экранных пикселей на пиксель поля
+  const px = scale * PIXEL_SCALE;
+  zoomLabel.textContent = `${px < 1 ? px.toFixed(2) : Math.round(px)}px`;
+}
+
+function clampScale(s) {
+  return Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));
 }
 
 function fitToScreen() {
   const cw = container.clientWidth;
   const ch = container.clientHeight;
-  const fitScale = Math.min(cw / GRID_SIZE, ch / GRID_SIZE);
-  scale = fitScale;
-  minScale = fitScale * 0.3;
-  maxScale = Math.max(60, fitScale * 80);
-  offsetX = (cw - GRID_SIZE * scale) / 2;
-  offsetY = (ch - GRID_SIZE * scale) / 2;
+  if (!cw || !ch) return false;
+
+  // Немного запаса (0.95), чтобы поле не касалось краёв
+  const fit = Math.min(cw / CANVAS_W, ch / CANVAS_H) * 0.95;
+  scale = clampScale(fit);
+  offsetX = (cw - CANVAS_W * scale) / 2;
+  offsetY = (ch - CANVAS_H * scale) / 2;
   applyTransform();
+  return true;
 }
 
-// Зум в точку (px, py — координаты относительно контейнера)
 function zoomAt(px, py, factor) {
-  const newScale = Math.max(minScale, Math.min(maxScale, scale * factor));
+  const newScale = clampScale(scale * factor);
   const actual = newScale / scale;
   offsetX = px - (px - offsetX) * actual;
   offsetY = py - (py - offsetY) * actual;
@@ -101,19 +124,18 @@ function zoomAt(px, py, factor) {
   applyTransform();
 }
 
-// Колесо мыши / тачпад
+// --- Колесо мыши / трекпад ---
 container.addEventListener("wheel", (e) => {
   e.preventDefault();
   const rect = container.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
-  // ctrl+wheel на трекпадах = pinch → более чувствительный зум
   const sensitivity = e.ctrlKey ? 0.01 : 0.002;
   const factor = Math.exp(-e.deltaY * sensitivity);
   zoomAt(px, py, factor);
 }, { passive: false });
 
-// Кнопки зума
+// --- Кнопки ---
 document.getElementById("zoom-in").addEventListener("click", () => {
   zoomAt(container.clientWidth / 2, container.clientHeight / 2, 1.5);
 });
@@ -122,7 +144,9 @@ document.getElementById("zoom-out").addEventListener("click", () => {
 });
 document.getElementById("fit-screen").addEventListener("click", fitToScreen);
 
-// === УКАЗАТЕЛИ (мышь + тач) ===
+// ============================================================
+// УКАЗАТЕЛИ
+// ============================================================
 const pointers = new Map();
 let pointerDownInfo = null;
 let isDragging = false;
@@ -133,7 +157,7 @@ let pinchStartScale = 1;
 let pinchCenter = { x: 0, y: 0 };
 
 container.addEventListener("pointerdown", (e) => {
-  container.setPointerCapture(e.pointerId);
+  try { container.setPointerCapture(e.pointerId); } catch {}
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
   if (pointers.size === 1) {
@@ -160,7 +184,7 @@ container.addEventListener("pointerdown", (e) => {
 
 container.addEventListener("pointermove", (e) => {
   if (!pointers.has(e.pointerId)) {
-    updateCursorPos(e); // обновляем координаты даже без нажатия
+    updateCursorPos(e);
     return;
   }
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -172,12 +196,11 @@ container.addEventListener("pointermove", (e) => {
   } else if (pointers.size === 2) {
     const pts = [...pointers.values()];
     const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-    const targetScale = pinchStartScale * (dist / pinchStartDist);
-    const newScale = Math.max(minScale, Math.min(maxScale, targetScale));
-    const factor = newScale / scale;
+    const targetScale = clampScale(pinchStartScale * (dist / pinchStartDist));
+    const factor = targetScale / scale;
     offsetX = pinchCenter.x - (pinchCenter.x - offsetX) * factor;
     offsetY = pinchCenter.y - (pinchCenter.y - offsetY) * factor;
-    scale = newScale;
+    scale = targetScale;
     applyTransform();
   }
 });
@@ -190,7 +213,6 @@ function endPointer(e) {
   if (pointers.size === 0) {
     isDragging = false;
     container.classList.remove("dragging");
-    // Проверка на "клик" — если почти не двигали и быстро отпустили
     if (pointerDownInfo && pointerDownInfo.id === e.pointerId) {
       const dx = e.clientX - pointerDownInfo.x;
       const dy = e.clientY - pointerDownInfo.y;
@@ -201,7 +223,6 @@ function endPointer(e) {
       pointerDownInfo = null;
     }
   } else if (pointers.size === 1) {
-    // Один палец остался — перезапускаем драг
     isDragging = true;
     const p = [...pointers.values()][0];
     dragStartX = p.x;
@@ -215,27 +236,28 @@ function endPointer(e) {
 container.addEventListener("pointerup", endPointer);
 container.addEventListener("pointercancel", endPointer);
 
-// Координаты курсора в пикселях поля
+// ============================================================
+// КООРДИНАТЫ
+// ============================================================
 function clientToPixel(clientX, clientY) {
   const rect = container.getBoundingClientRect();
-  const x = Math.floor((clientX - rect.left - offsetX) / scale);
-  const y = Math.floor((clientY - rect.top - offsetY) / scale);
+  // Экранные пиксели на пиксель поля = scale * PIXEL_SCALE
+  const perPixel = scale * PIXEL_SCALE;
+  const x = Math.floor((clientX - rect.left - offsetX) / perPixel);
+  const y = Math.floor((clientY - rect.top - offsetY) / perPixel);
   return { x, y };
 }
 
 function updateCursorPos(e) {
   const { x, y } = clientToPixel(e.clientX, e.clientY);
-  if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
-    cursorPosEl.textContent = `Курсор: (${x}, ${y})`;
-  } else {
-    cursorPosEl.textContent = "Курсор: —";
-  }
+  cursorPosEl.textContent = (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE)
+    ? `Курсор: (${x}, ${y})`
+    : "Курсор: —";
 }
 
 container.addEventListener("mousemove", (e) => {
   updateCursorPos(e);
 
-  // Tooltip
   const { x, y } = clientToPixel(e.clientX, e.clientY);
   if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) {
     tooltip.style.display = "none";
@@ -339,7 +361,7 @@ COLORS.forEach((color, i) => {
 });
 
 // ============================================================
-// ЗАГРУЗКА ПИКСЕЛЕЙ ИЗ FIREBASE
+// FIREBASE
 // ============================================================
 clearCanvas();
 
@@ -354,9 +376,6 @@ onValue(ref(db, "pixels"), (snapshot) => {
   pixelCache = data;
 });
 
-// ============================================================
-// КЛИК ПО КАНВАСУ → РИСУЕМ
-// ============================================================
 async function handleCanvasClick(e) {
   if (!currentUser) {
     alert("Войдите через Google, чтобы рисовать.");
@@ -388,22 +407,30 @@ async function handleCanvasClick(e) {
 // ============================================================
 // ИНИЦИАЛИЗАЦИЯ
 // ============================================================
-// Первичная подгонка после того, как браузер посчитал layout
-window.addEventListener("load", () => {
-  requestAnimationFrame(fitToScreen);
-});
+function tryInit() {
+  if (initialized) return;
+  if (fitToScreen()) initialized = true;
+}
 
-window.addEventListener("resize", () => {
-  // Не сбрасываем зум при resize, только если контейнер стал меньше
-  // (просто на всякий случай обновляем minScale)
-  const fitScale = Math.min(
-    container.clientWidth / GRID_SIZE,
-    container.clientHeight / GRID_SIZE
-  );
-  minScale = fitScale * 0.3;
+// ResizeObserver — надёжнее, чем load/resize: срабатывает, как только
+// контейнер получает реальные размеры (это критично для мобильных)
+const ro = new ResizeObserver(() => {
+  if (!initialized) {
+    tryInit();
+  } else {
+    // После инициализации — при смене размеров окна подгоняем лимиты,
+    // но не трогаем текущий вид пользователя
+    // (при желании можно раскомментировать авто-фит: fitToScreen();)
+  }
 });
+ro.observe(container);
 
-// Клавиатурные шорткаты (десктоп)
+window.addEventListener("load", tryInit);
+// Страховка на случай, если ResizeObserver не сработал
+setTimeout(tryInit, 200);
+setTimeout(tryInit, 800);
+
+// Клавиатурные шорткаты
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
   const cx = container.clientWidth / 2;
