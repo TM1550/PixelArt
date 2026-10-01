@@ -1,10 +1,11 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut }
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getDatabase, ref, set, get, onValue, onDisconnect, serverTimestamp }
+import { getDatabase, ref, set, get, onValue }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
-// === ЗАМЕНИ НА СВОЙ КОНФИГ ИЗ FIREBASE ===
+// === КОНФИГ ИЗ FIREBASE ===
+// Your web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyBb8SFdz4CHRuIz1qwpcbyN4Zpfg3stdlo",
   authDomain: "pixelart-e69d7.firebaseapp.com",
@@ -19,11 +20,10 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
 
-// === КОНСТАНТЫ ===
-const GRID_SIZE = 1000;
-const COOLDOWN_MS = 5000; // 5 секунд
+// === НАСТРОЙКИ ===
+const GRID_SIZE = 1000;      // <-- поменяй на 200, если хочешь поле меньше
+const COOLDOWN_MS = 5000;
 
-// 16 основных цветов (индексы 0–15)
 const COLORS = [
   "#000000", "#FFFFFF", "#FF0000", "#00FF00",
   "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF",
@@ -36,45 +36,231 @@ let currentUser = null;
 let selectedColor = 0;
 let userNick = "";
 let lastPaintTime = 0;
-let pixelCache = {}; // { "x_y": { color, uid, nick } }
+let pixelCache = {};
 
+const container = document.getElementById("canvas-container");
 const canvas = document.getElementById("pixel-canvas");
 const ctx = canvas.getContext("2d");
 const tooltip = document.getElementById("tooltip");
+const zoomLabel = document.getElementById("zoom-label");
+const cursorPosEl = document.getElementById("cursor-pos");
+const fieldSizeEl = document.getElementById("field-size");
 
-// === ОТРИСОВКА ПИКСЕЛЕЙ ===
-// Рисуем по одному пикселю за раз, масштабируя 1000x1000 до canvas.
-// Для производительности canvas 1000x1000 и один пиксель = 1x1 CSS-пиксель.
+// Устанавливаем нативный размер канваса = логическому размеру поля
+canvas.width = GRID_SIZE;
+canvas.height = GRID_SIZE;
 
+fieldSizeEl.textContent = `Поле: ${GRID_SIZE} × ${GRID_SIZE} (${(GRID_SIZE * GRID_SIZE / 1000).toFixed(0)}K пикселей)`;
+
+// ============================================================
+// ОТРИСОВКА
+// ============================================================
 function drawPixel(x, y, colorIndex) {
   ctx.fillStyle = COLORS[colorIndex];
   ctx.fillRect(x, y, 1, 1);
 }
 
-function redrawAll() {
+function clearCanvas() {
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, GRID_SIZE, GRID_SIZE);
-  for (const [key, data] of Object.entries(pixelCache)) {
-    const [x, y] = key.split("_").map(Number);
-    drawPixel(x, y, data.color);
+}
+
+// ============================================================
+// ЗУМ И ПАН
+// ============================================================
+let scale = 1;
+let offsetX = 0;
+let offsetY = 0;
+let minScale = 0.05;
+let maxScale = 60;
+
+function applyTransform() {
+  canvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+  zoomLabel.textContent = Math.round(scale * 100) + "%";
+}
+
+function fitToScreen() {
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  const fitScale = Math.min(cw / GRID_SIZE, ch / GRID_SIZE);
+  scale = fitScale;
+  minScale = fitScale * 0.3;
+  maxScale = Math.max(60, fitScale * 80);
+  offsetX = (cw - GRID_SIZE * scale) / 2;
+  offsetY = (ch - GRID_SIZE * scale) / 2;
+  applyTransform();
+}
+
+// Зум в точку (px, py — координаты относительно контейнера)
+function zoomAt(px, py, factor) {
+  const newScale = Math.max(minScale, Math.min(maxScale, scale * factor));
+  const actual = newScale / scale;
+  offsetX = px - (px - offsetX) * actual;
+  offsetY = py - (py - offsetY) * actual;
+  scale = newScale;
+  applyTransform();
+}
+
+// Колесо мыши / тачпад
+container.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const rect = container.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  // ctrl+wheel на трекпадах = pinch → более чувствительный зум
+  const sensitivity = e.ctrlKey ? 0.01 : 0.002;
+  const factor = Math.exp(-e.deltaY * sensitivity);
+  zoomAt(px, py, factor);
+}, { passive: false });
+
+// Кнопки зума
+document.getElementById("zoom-in").addEventListener("click", () => {
+  zoomAt(container.clientWidth / 2, container.clientHeight / 2, 1.5);
+});
+document.getElementById("zoom-out").addEventListener("click", () => {
+  zoomAt(container.clientWidth / 2, container.clientHeight / 2, 1 / 1.5);
+});
+document.getElementById("fit-screen").addEventListener("click", fitToScreen);
+
+// === УКАЗАТЕЛИ (мышь + тач) ===
+const pointers = new Map();
+let pointerDownInfo = null;
+let isDragging = false;
+let dragStartX = 0, dragStartY = 0;
+let startOffsetX = 0, startOffsetY = 0;
+let pinchStartDist = 0;
+let pinchStartScale = 1;
+let pinchCenter = { x: 0, y: 0 };
+
+container.addEventListener("pointerdown", (e) => {
+  container.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (pointers.size === 1) {
+    isDragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    startOffsetX = offsetX;
+    startOffsetY = offsetY;
+    pointerDownInfo = { x: e.clientX, y: e.clientY, time: Date.now(), id: e.pointerId };
+    container.classList.add("dragging");
+  } else if (pointers.size === 2) {
+    isDragging = false;
+    pointerDownInfo = null;
+    const pts = [...pointers.values()];
+    pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    pinchStartScale = scale;
+    const rect = container.getBoundingClientRect();
+    pinchCenter = {
+      x: (pts[0].x + pts[1].x) / 2 - rect.left,
+      y: (pts[0].y + pts[1].y) / 2 - rect.top
+    };
+  }
+});
+
+container.addEventListener("pointermove", (e) => {
+  if (!pointers.has(e.pointerId)) {
+    updateCursorPos(e); // обновляем координаты даже без нажатия
+    return;
+  }
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (pointers.size === 1 && isDragging) {
+    offsetX = startOffsetX + (e.clientX - dragStartX);
+    offsetY = startOffsetY + (e.clientY - dragStartY);
+    applyTransform();
+  } else if (pointers.size === 2) {
+    const pts = [...pointers.values()];
+    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    const targetScale = pinchStartScale * (dist / pinchStartDist);
+    const newScale = Math.max(minScale, Math.min(maxScale, targetScale));
+    const factor = newScale / scale;
+    offsetX = pinchCenter.x - (pinchCenter.x - offsetX) * factor;
+    offsetY = pinchCenter.y - (pinchCenter.y - offsetY) * factor;
+    scale = newScale;
+    applyTransform();
+  }
+});
+
+function endPointer(e) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  try { container.releasePointerCapture(e.pointerId); } catch {}
+
+  if (pointers.size === 0) {
+    isDragging = false;
+    container.classList.remove("dragging");
+    // Проверка на "клик" — если почти не двигали и быстро отпустили
+    if (pointerDownInfo && pointerDownInfo.id === e.pointerId) {
+      const dx = e.clientX - pointerDownInfo.x;
+      const dy = e.clientY - pointerDownInfo.y;
+      const dt = Date.now() - pointerDownInfo.time;
+      if (Math.hypot(dx, dy) < 6 && dt < 600) {
+        handleCanvasClick(e);
+      }
+      pointerDownInfo = null;
+    }
+  } else if (pointers.size === 1) {
+    // Один палец остался — перезапускаем драг
+    isDragging = true;
+    const p = [...pointers.values()][0];
+    dragStartX = p.x;
+    dragStartY = p.y;
+    startOffsetX = offsetX;
+    startOffsetY = offsetY;
+    pointerDownInfo = null;
   }
 }
 
-// === ПОДПИСКА НА ПИКСЕЛИ ===
-const pixelsRef = ref(db, "pixels");
-onValue(pixelsRef, (snapshot) => {
-  const data = snapshot.val() || {};
-  // Обновляем только изменённые пиксели для производительности
-  for (const [key, val] of Object.entries(data)) {
-    if (!pixelCache[key] || pixelCache[key].color !== val.color) {
-      const [x, y] = key.split("_").map(Number);
-      drawPixel(x, y, val.color);
-    }
+container.addEventListener("pointerup", endPointer);
+container.addEventListener("pointercancel", endPointer);
+
+// Координаты курсора в пикселях поля
+function clientToPixel(clientX, clientY) {
+  const rect = container.getBoundingClientRect();
+  const x = Math.floor((clientX - rect.left - offsetX) / scale);
+  const y = Math.floor((clientY - rect.top - offsetY) / scale);
+  return { x, y };
+}
+
+function updateCursorPos(e) {
+  const { x, y } = clientToPixel(e.clientX, e.clientY);
+  if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+    cursorPosEl.textContent = `Курсор: (${x}, ${y})`;
+  } else {
+    cursorPosEl.textContent = "Курсор: —";
   }
-  pixelCache = data;
+}
+
+container.addEventListener("mousemove", (e) => {
+  updateCursorPos(e);
+
+  // Tooltip
+  const { x, y } = clientToPixel(e.clientX, e.clientY);
+  if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) {
+    tooltip.style.display = "none";
+    return;
+  }
+  const key = `${x}_${y}`;
+  if (pixelCache[key]) {
+    const rect = container.getBoundingClientRect();
+    tooltip.style.display = "block";
+    tooltip.textContent = `${pixelCache[key].nick} (${x}, ${y})`;
+    tooltip.style.left = (e.clientX - rect.left + 14) + "px";
+    tooltip.style.top = (e.clientY - rect.top + 14) + "px";
+  } else {
+    tooltip.style.display = "none";
+  }
 });
 
-// === АВТОРИЗАЦИЯ ===
+container.addEventListener("mouseleave", () => {
+  tooltip.style.display = "none";
+  cursorPosEl.textContent = "Курсор: —";
+});
+
+// ============================================================
+// АВТОРИЗАЦИЯ
+// ============================================================
 const googleLoginBtn = document.getElementById("google-login");
 const userInfo = document.getElementById("user-info");
 const userAvatar = document.getElementById("user-avatar");
@@ -99,7 +285,6 @@ onAuthStateChanged(auth, async (user) => {
     userAvatar.src = user.photoURL || "";
     userAvatar.alt = user.displayName || "";
 
-    // Загружаем ник из базы или ставим displayName по умолчанию
     const nickSnap = await get(ref(db, `nicks/${user.uid}`));
     if (nickSnap.exists()) {
       userNick = nickSnap.val();
@@ -109,7 +294,6 @@ onAuthStateChanged(auth, async (user) => {
     }
     nickInput.value = userNick;
 
-    // Загружаем кулдаун
     const cdSnap = await get(ref(db, `cooldowns/${user.uid}`));
     lastPaintTime = cdSnap.exists() ? cdSnap.val() : 0;
     updateCooldownUI();
@@ -121,7 +305,6 @@ onAuthStateChanged(auth, async (user) => {
   }
 });
 
-// === СОХРАНЕНИЕ НИКА ===
 saveNickBtn.addEventListener("click", async () => {
   if (!currentUser) return;
   const newNick = nickInput.value.trim().slice(0, 32);
@@ -131,20 +314,17 @@ saveNickBtn.addEventListener("click", async () => {
   alert("Ник сохранён!");
 });
 
-// === КУЛДАУН ===
 function updateCooldownUI() {
-  const now = Date.now();
-  const remaining = lastPaintTime + COOLDOWN_MS - now;
-  if (remaining > 0) {
-    cooldownStatus.textContent = `⏳ ${Math.ceil(remaining / 1000)} с`;
-  } else {
-    cooldownStatus.textContent = "✅ Можно рисовать";
-  }
+  const remaining = lastPaintTime + COOLDOWN_MS - Date.now();
+  cooldownStatus.textContent = remaining > 0
+    ? `⏳ ${Math.ceil(remaining / 1000)} с`
+    : "✅ Можно рисовать";
 }
-
 setInterval(updateCooldownUI, 200);
 
-// === ПАЛИТРА ===
+// ============================================================
+// ПАЛИТРА
+// ============================================================
 const paletteEl = document.getElementById("palette");
 COLORS.forEach((color, i) => {
   const swatch = document.createElement("div");
@@ -158,23 +338,34 @@ COLORS.forEach((color, i) => {
   paletteEl.appendChild(swatch);
 });
 
-// === КЛИК ПО CANVAS ===
-canvas.addEventListener("click", async (e) => {
+// ============================================================
+// ЗАГРУЗКА ПИКСЕЛЕЙ ИЗ FIREBASE
+// ============================================================
+clearCanvas();
+
+onValue(ref(db, "pixels"), (snapshot) => {
+  const data = snapshot.val() || {};
+  for (const [key, val] of Object.entries(data)) {
+    if (!pixelCache[key] || pixelCache[key].color !== val.color) {
+      const [x, y] = key.split("_").map(Number);
+      drawPixel(x, y, val.color);
+    }
+  }
+  pixelCache = data;
+});
+
+// ============================================================
+// КЛИК ПО КАНВАСУ → РИСУЕМ
+// ============================================================
+async function handleCanvasClick(e) {
   if (!currentUser) {
     alert("Войдите через Google, чтобы рисовать.");
     return;
   }
 
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-
-  const x = Math.floor((e.clientX - rect.left) * scaleX);
-  const y = Math.floor((e.clientY - rect.top) * scaleY);
-
+  const { x, y } = clientToPixel(e.clientX, e.clientY);
   if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return;
 
-  // Проверка кулдауна на клиенте (сервер тоже проверяет через правила)
   const now = Date.now();
   if (now - lastPaintTime < COOLDOWN_MS) {
     alert(`Подождите ${Math.ceil((COOLDOWN_MS - (now - lastPaintTime)) / 1000)} с.`);
@@ -182,51 +373,42 @@ canvas.addEventListener("click", async (e) => {
   }
 
   const key = `${x}_${y}`;
-  const pixelRef = ref(db, `pixels/${key}`);
-
-  // Проверяем, не занят ли пиксель другим пользователем (не перезаписываем чужое)
-  const snap = await get(pixelRef);
-  if (snap.exists() && snap.val().uid !== currentUser.uid) {
-    alert("Этот пиксель уже занят другим художником.");
-    return;
-  }
-
-  // Записываем пиксель
-  await set(pixelRef, {
+  await set(ref(db, `pixels/${key}`), {
     color: selectedColor,
     uid: currentUser.uid,
     nick: userNick,
-    timestamp: Date.now()
+    timestamp: now
   });
 
-  // Обновляем кулдаун
   lastPaintTime = now;
   await set(ref(db, `cooldowns/${currentUser.uid}`), now);
   updateCooldownUI();
+}
+
+// ============================================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================================
+// Первичная подгонка после того, как браузер посчитал layout
+window.addEventListener("load", () => {
+  requestAnimationFrame(fitToScreen);
 });
 
-// === TOOLTIP ПРИ НАВЕДЕНИИ ===
-canvas.addEventListener("mousemove", (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = Math.floor((e.clientX - rect.left) * scaleX);
-  const y = Math.floor((e.clientY - rect.top) * scaleY);
-  const key = `${x}_${y}`;
-
-  if (pixelCache[key]) {
-    tooltip.style.display = "block";
-    tooltip.textContent = `${pixelCache[key].nick} (${x}, ${y})`;
-    tooltip.style.left = (e.clientX - rect.left + 12) + "px";
-    tooltip.style.top = (e.clientY - rect.top + 12) + "px";
-  } else {
-    tooltip.style.display = "none";
-  }
+window.addEventListener("resize", () => {
+  // Не сбрасываем зум при resize, только если контейнер стал меньше
+  // (просто на всякий случай обновляем minScale)
+  const fitScale = Math.min(
+    container.clientWidth / GRID_SIZE,
+    container.clientHeight / GRID_SIZE
+  );
+  minScale = fitScale * 0.3;
 });
 
-canvas.addEventListener("mouseleave", () => {
-  tooltip.style.display = "none";
+// Клавиатурные шорткаты (десктоп)
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  const cx = container.clientWidth / 2;
+  const cy = container.clientHeight / 2;
+  if (e.key === "+" || e.key === "=") zoomAt(cx, cy, 1.3);
+  if (e.key === "-" || e.key === "_") zoomAt(cx, cy, 1 / 1.3);
+  if (e.key === "0") fitToScreen();
 });
-
-// === ИНИЦИАЛИЗАЦИЯ CANVAS ===
-redrawAll();
