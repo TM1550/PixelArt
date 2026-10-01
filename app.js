@@ -21,7 +21,7 @@ const auth = getAuth(app);
 const db = getDatabase(app);
 
 // === НАСТРОЙКИ ===
-const GRID_SIZE = 1000;      // <-- поменяй на 200, если хочешь поле меньше
+const GRID_SIZE = 300;      // <-- поменяй на 200, если хочешь поле меньше
 const COOLDOWN_MS = 5000;
 
 const COLORS = [
